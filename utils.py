@@ -75,8 +75,26 @@ class encoder:
         return self.x_pn
 
     #step D: hamming window
-    def hammingwindow():
-        pass
+    def hammingwindow(self, k):
+        '''
+        hamming_window: w(n) = 0.54 - 0.46cos(2*pi*n/M-1)
+        x_an: analysis frame which is the frame concatenated previous 10ms frame and present 10ms frame
+        x_pnw = hamming_window*x_an
+        '''
+        hamming_window = np.hamming(2*self.Ns)
+        if k == 0:
+            x_an = np.concatenate((self.x_pn[:self.Ns], self.x_pn[:self.Ns]))
+        elif k==self.K:
+            x_an = np.concatenate((self.x_pn[(self.K-1)*self.Ns:(self.K)*self.Ns], self.x_pn[(self.K-1)*self.Ns:(self.K)*self.Ns]))
+        elif k>self.K:
+            print("window frame pass over the number of total frame")
+        else:
+            x_an = self.x_pn[((k-1)*self.Ns):((k+1)*self.Ns)]
+        x_pnw = x_an*hamming_window
+        
+        return x_pnw
+
+    
 
 if __name__ == '__main__':
     enc = encoder()
@@ -84,7 +102,11 @@ if __name__ == '__main__':
     #print(enc.x)
     x_p = enc.preemphasis()
     x_pn = enc.tinynoiseadd()
+    enc.hammingwindow(775)
+    
+    exit()
     print(x_p)
     print(x_pn)
     print("A.shape: {}\nE.shape: {}".format(A.shape,E.shape))
     print("x_pn.shape: {}".format(x_pn.shape))
+    print("K: {}".format(enc.K))
