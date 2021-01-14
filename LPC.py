@@ -21,13 +21,13 @@ class encoder:
         T: the length of x
         K: the ceiling number of frame
         '''
-        self.x, self.Fs = librosa.load(wavfilename, sr=8000)
+        self.x, self.Fs = librosa.load(wavfilename, sr=16000)
         self.Ns = int(self.Fs*Ts)
         self.T = self.x.shape[0]
         self.K = (self.T-self.Ns-1)//self.Ns
         self.M = M
 
-        self.x = self.x[:self.Ns*self.K] # cut the last frame
+        self.x = self.x[:self.Ns*self.K] # cut the last lame frame
         
         #init A, E ndarray where A is the i
         A = np.zeros((M+1, self.K))
@@ -54,6 +54,7 @@ class encoder:
             x_pn = self.tinynoiseadd(x_p)
             self.x_pn[:,k] = x_pn
             x_pnw = self.hammingwindow(mem_pn, x_pn)
+            
             A[:,k] = self.LPC(x_pnw)
             E[:,k] = self.LPCenc(x_pn, A[:,k], mem_pn)
 
@@ -84,7 +85,7 @@ class encoder:
         return x_p
     
     #step C: Tiny noise addition
-    def tinynoiseadd(self, x_p, epsilon=10e-6):
+    def tinynoiseadd(self, x_p, epsilon=1e-6):
         '''
         x_pn = x_p + epsilon*(gaussian random value)
         epsilon:
@@ -151,37 +152,82 @@ class decoder(encoder):
 
         self.A = A_
         self.E = E_
+    
+    """
+    def LPdecoder(self) :
+        A = self.A.T
+        E = self.E.T
+        T = self.K*self.Ns
 
+        K, Ns = E.shape
+        M = A.shape[1]-1
+        x_hat= np.ndarray((K,Ns))
+        x_hat_pn_mem = np.zeros((M,))
+        x_hat_mem=0
+        
+        for k in range(K) :
+            # G.LPCdec
+            x_hat_pn = self.LPCdec(E[k,:],A[k,:], x_hat_pn_mem)
+            
+            # H.de-emphasis
+            x_hat[k,:]= self.deemphasis(x_hat_pn, x_hat_mem)
+            
+            
+            x_hat_pn_mem = x_hat_pn[-M:]
+            x_hat_mem = x_hat[k,-1]
+            
+        x_hat = x_hat.reshape([-1])
+        return x_hat[:T]
+
+    # G.LPCdec
+    def LPCdec(self, e,a,mem) :
+        T = len(e)
+        M = len(a)-1
+        x_hat_pn = np.ndarray((T,))
+        x_hat_pn = np.concatenate([mem,x_hat_pn])
+        for t in range(T) :
+             x_hat_pn[M+t] = (e[t] - np.sum(x_hat_pn[t:t+M]*a[:0:-1]))/a[0]
+        return x_hat_pn[M:]
+    
+    # H.de-emphasis
+    def deemphasis(self, x_hat_pn, x_hat_mem=0, alpha=0.98) :
+        x_hat = np.ndarray(x_hat_pn.shape)
+        x_hat[0] = x_hat_pn[0] + alpha*x_hat_mem
+        for t in range(1,len(x_hat)) :
+            x_hat[t] = x_hat_pn[t] + (alpha * x_hat[t-1])
+        return x_hat
+    """
+    #"""
     def LPdecoder(self):
         x_concat_hat_d = np.zeros(self.Ns*self.K)
-
-        mem = np.zeros(self.Ns)
+        
+        mem_pn = np.zeros(self.M, dtype=np.float)
+        mem_d = np.zeros(self.Ns, dtype=np.float)
         for k in range(self.K):
-            x_hat_pn = self.LPdec(self.E[:,k], self.A[:,k], self.x_pn[:,k], mem)
-            x_hat_d = self.deemphasis(x_hat_pn, mem)
+            x_hat_pn = self.LPdec(self.E[:,k], self.A[:,k], mem_pn)
+            x_hat_d = self.deemphasis(x_hat_pn, mem_d)
 
             x_concat_hat_d[k*self.Ns:(k+1)*self.Ns] = x_hat_d
-
-            mem = self.x_pn[:,k]
-
-        return x_concat_hat_d
             
+            mem_pn = x_hat_pn[-self.M:]
+            mem_d = x_hat_d
+        
+        return x_concat_hat_d
+
     # step G: LPdec
-    def LPdec(self, e, a, x_pn, mem):
+    def LPdec(self, e, a, mem):
         '''
         e[t] = a[t]*x[t] <=> e[t] = a_0x[t] + a_1x[t-1] + a_2x[t-2] + ... + a_Mx[t-M]
         => x_hat_pn[k,t] = e[k,t] - a[k,1]x_hat_pn[t-1] - a[k,2]x_hat_pn[t-2] - ... - a[k,M]x_hat_pn[t-M]
         
         * M samples of x_hat_pn memory are needed
         '''
-        T = len(x_pn)
-        x_hat_pn = np.zeros(T)
-        for t in range(T):
-            mem[:-1] = mem[1:]
-            mem[-1] = x_pn[t]
-            x_hat_pn[t] = e[t] - np.dot(a[1:], np.flip(mem[-a.shape[0]:-1]))
-
-        return x_hat_pn
+        x_hat_pn = np.zeros(self.Ns, dtype=np.float)
+        x_hat_pn = np.concatenate([mem,x_hat_pn])
+        for t in range(self.Ns):
+            x_hat_pn[self.M+t] = e[t] - np.dot(a[1:], np.flip(x_hat_pn[t:t+self.M]))
+        
+        return x_hat_pn[self.M:]
     
     # step H: De-emphasis
     def deemphasis(self, x_hat_pn, x_mem, alpha=0.98):
@@ -189,11 +235,13 @@ class decoder(encoder):
         x_hat_d[t] = x_hat_pn[t] + alpha*x_hat_pn[t-1]
         when t is 0, x_mem is need to caculate.
         '''
-        x_hat_d = np.zeros(len(x_hat_pn))
+        x_hat_d = np.zeros(len(x_hat_pn), dtype=np.float)
         x_hat_d[0] = x_hat_pn[0] + alpha*x_mem[-1]
-        x_hat_d[1:] = x_hat_pn[1:] + alpha*x_hat_pn[:-1]
+        for t in range(1, len(x_hat_d)):
+            x_hat_d[t] = x_hat_pn[t] + (alpha*x_hat_d[t-1])
 
         return x_hat_d
+    #"""
 
 if __name__ == '__main__':
     '''
