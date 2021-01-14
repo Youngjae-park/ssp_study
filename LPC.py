@@ -26,10 +26,13 @@ class encoder:
         self.T = self.x.shape[0]
         self.K = (self.T-self.Ns-1)//self.Ns
         self.M = M
+
+        self.x = self.x[:self.Ns*self.K] # cut the last frame
         
         #init A, E ndarray where A is the i
         A = np.zeros((M+1, self.K))
         E = np.zeros((self.Ns, self.K))
+        self.x_pn = np.zeros((self.Ns, self.K))
         
         """
         for k in range(self.K):
@@ -42,12 +45,14 @@ class encoder:
             A[:,k] = librosa.lpc(x_k, M) 
             E[:,k] = lfilter(A[:,k],1,x_k)
         """
+
         mem_k = np.zeros(self.Ns)
         mem_pn = np.zeros(self.Ns)
         for k in range(self.K):
             x_k = self.short_time_framing(k)
             x_p = self.preemphasis(x_k, mem_k)
             x_pn = self.tinynoiseadd(x_p)
+            self.x_pn[:,k] = x_pn
             x_pnw = self.hammingwindow(mem_pn, x_pn)
             A[:,k] = self.LPC(x_pnw)
             E[:,k] = self.LPCenc(x_pn, A[:,k], mem_pn)
@@ -65,24 +70,20 @@ class encoder:
     def short_time_framing(self, k):
         return self.x[(k*self.Ns):((k+1)*self.Ns)]
 
-    # step B: pre-emphasis
+    # step B: Pre-emphasis
     def preemphasis(self, x_k, x_mem, alpha=0.98):
         '''
         x_mem: the memory for calculating the first sample, the last sample of previous frame - x[k-1,Ns]
+        x_p[t] = x[t] - alpha*x[t-1] ( when t is 0, x_mem is needed to calculate )
         '''
-        return x_k - alpha*x_mem
-    
-    ''' No need to deemphasis
-    # step B: de-emphasis
-    def deemphasis(self, alpha=0.98):
-        if not self.x_p:
-            print("Doesn't have preemphasis data")
-            continue
-        else:
-            self.x_d = self.x_p + alpha*self.x_d
-    '''
+        T = len(x_k)
+        x_p = np.zeros(T)
+        x_p[0] = x_k[0] - alpha*x_mem[-1]
+        x_p[1:] = x_k[1:] - alpha*x_k[:-1]
 
-    #step C: tiny noise addition
+        return x_p
+    
+    #step C: Tiny noise addition
     def tinynoiseadd(self, x_p, epsilon=10e-6):
         '''
         x_pn = x_p + epsilon*(gaussian random value)
@@ -93,7 +94,7 @@ class encoder:
         x_pn = x_p + epsilon*np.random.randn(x_p.shape[0])
         return x_pn
 
-    #step D: hamming window
+    #step D: Hamming window
     def hammingwindow(self, before, present, method='zero'):
         '''
         hamming_window: w(n) = 0.54 - 0.46cos(2*pi*n/M-1)
@@ -102,19 +103,7 @@ class encoder:
         '''
         x_an = np.zeros(2*self.Ns)
         hamming_window = np.hamming(2*self.Ns)
-        if method=='sync':
-            if k == 0:
-                x_an = np.concatenate((self.x_pn[:self.Ns], self.x_pn[:self.Ns]))
-            elif k==self.K:
-                x_an = np.concatenate((self.x_pn[(self.K-1)*self.Ns:(self.K)*self.Ns], self.x_pn[(self.K-1)*self.Ns:(self.K)*self.Ns]))
-            elif k>self.K:
-                print("Error: window frame pass over the number of total frame")
-                return
-            else:
-                x_an = self.x_pn[((k-1)*self.Ns):((k+1)*self.Ns)]
-            x_pnw = x_an*hamming_window
-            return x_pnw
-        elif method == 'zero':
+        if method == 'zero':
             x_an[:self.Ns] = before
             x_an[self.Ns:] = present
             x_pnw = x_an*hamming_window
@@ -151,27 +140,83 @@ class encoder:
         
         return e
 
-class decoder:
-    def __init__(self):
-        pass
+class decoder(encoder):
+    def __init__(self, encoder_, A_, E_):
+        self.x = encoder_.x
+        self.Fs = encoder_.Fs
+        self.Ns = encoder_.Ns
+        self.M = encoder_.M
+        self.K = encoder_.K
+        self.x_pn = encoder_.x_pn
+
+        self.A = A_
+        self.E = E_
+
+    def LPdecoder(self):
+        x_concat_hat_d = np.zeros(self.Ns*self.K)
+
+        mem = np.zeros(self.Ns)
+        for k in range(self.K):
+            x_hat_pn = self.LPdec(self.E[:,k], self.A[:,k], self.x_pn[:,k], mem)
+            x_hat_d = self.deemphasis(x_hat_pn, mem)
+
+            x_concat_hat_d[k*self.Ns:(k+1)*self.Ns] = x_hat_d
+
+            mem = self.x_pn[:,k]
+
+        return x_concat_hat_d
+            
+    # step G: LPdec
+    def LPdec(self, e, a, x_pn, mem):
+        '''
+        e[t] = a[t]*x[t] <=> e[t] = a_0x[t] + a_1x[t-1] + a_2x[t-2] + ... + a_Mx[t-M]
+        => x_hat_pn[k,t] = e[k,t] - a[k,1]x_hat_pn[t-1] - a[k,2]x_hat_pn[t-2] - ... - a[k,M]x_hat_pn[t-M]
+        
+        * M samples of x_hat_pn memory are needed
+        '''
+        T = len(x_pn)
+        x_hat_pn = np.zeros(T)
+        for t in range(T):
+            mem[:-1] = mem[1:]
+            mem[-1] = x_pn[t]
+            x_hat_pn[t] = e[t] - np.dot(a[1:], np.flip(mem[-a.shape[0]:-1]))
+
+        return x_hat_pn
     
-    def LPdecoer(self):
-        pass
-    
+    # step H: De-emphasis
+    def deemphasis(self, x_hat_pn, x_mem, alpha=0.98):
+        '''
+        x_hat_d[t] = x_hat_pn[t] + alpha*x_hat_pn[t-1]
+        when t is 0, x_mem is need to caculate.
+        '''
+        x_hat_d = np.zeros(len(x_hat_pn))
+        x_hat_d[0] = x_hat_pn[0] + alpha*x_mem[-1]
+        x_hat_d[1:] = x_hat_pn[1:] + alpha*x_hat_pn[:-1]
+
+        return x_hat_d
 
 if __name__ == '__main__':
+    '''
     enc = encoder()
     A, E = enc.wavfilevocoder('/home/dhodwo/ssp_study/ssp_assignment/data/timit_wav_selected/fecd0/sa1.wav', 10)
-    #print(enc.Ns)
+    dec = decoder(enc, A, E)
+    x_hat = dec.LPdecoder()
+    '''
+    
+    # print(enc.x.shape)
+    # print(x_hat.shape)
+
+    # print("A:{}\nE:{}\nA.shape:{}\tE.shape:{}".format(A,E,A.shape,E.shape))
+    # print(enc.Ns)
     # print(enc.x)
     # print(enc.Fs)
     # print(A.shape)
     # print(E.shape)
-    #x_p = enc.preemphasis()
-    #x_pn = enc.tinynoiseadd()
-    #x_test = enc.hammingwindow(433)
-    #A = enc.LPC(x_test)
-    #enc.LPCenc(x_pn, A, 0)
+    # x_p = enc.preemphasis()
+    # x_pn = enc.tinynoiseadd()
+    # x_test = enc.hammingwindow(433)
+    # A = enc.LPC(x_test)
+    # enc.LPCenc(x_pn, A, 0)
     
     exit()
     print(x_p)
